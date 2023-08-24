@@ -185,8 +185,21 @@ int main(int argc, char *argv[]) {
         fprintf(stderr,"Error: Allocating the layer memory\n");
         exit( EXIT_FAILURE );
     }
+    int num_threads = 1;
+
+#pragma omp parallel
+    {
+#pragma omp for
     for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
+#pragma omp for
     for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
+
+#pragma omp single
+    num_threads = omp_get_num_threads();
+    }
+
+    float *thread_max = malloc(sizeof(float) * num_threads);
+    int *thread_pos = malloc(sizeof(int) * num_threads);
     
     /* 4. Storms simulation */
     for( i=0; i<num_storms; i++) {
@@ -200,6 +213,7 @@ int main(int argc, char *argv[]) {
             int position = storms[i].posval[j*2];
 
             /* For each cell in the layer */
+#pragma omp parallel for
             for( k=0; k<layer_size; k++ ) {
                 /* Update the energy value for the cell */
                 update( layer, layer_size, k, position, energy );
@@ -208,15 +222,48 @@ int main(int argc, char *argv[]) {
 
         /* 4.2. Energy relaxation between storms */
         /* 4.2.1. Copy values to the ancillary array */
+#pragma omp parallel for
         for( k=0; k<layer_size; k++ ) 
             layer_copy[k] = layer[k];
 
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
+#pragma omp parallel for
         for( k=1; k<layer_size-1; k++ )
             layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
 
         /* 4.3. Locate the maximum value in the layer, and its position */
+#if 1
+#pragma omp parallel
+        {
+            float max = 0.0f;
+            int pos = 0;
+
+#pragma omp for
+            for( k=1; k<layer_size-1; k++ ) {
+                /* Check it only if it is a local maximum */
+                if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
+                    if ( layer[k] > max ) {
+                        max = layer[k];
+                        pos = k;
+                    }
+                }
+            }
+
+            int id = omp_get_thread_num();
+            thread_max[id] = max;
+            thread_pos[id] = pos;
+        }
+
+        maximum[i] = thread_max[0];
+        positions[i] = thread_pos[0];
+        for (k = 1; k < num_threads; k++) {
+            if (thread_max[k] > maximum[i]) {
+                maximum[i] = thread_max[k];
+                positions[i] = thread_pos[k];
+            }
+        }
+#else
         for( k=1; k<layer_size-1; k++ ) {
             /* Check it only if it is a local maximum */
             if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
@@ -226,6 +273,7 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
+#endif
     }
 
     /* END: Do NOT optimize/parallelize the code below this point */
