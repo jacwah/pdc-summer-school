@@ -163,7 +163,13 @@ int main(int argc, char *argv[]) {
         exit( EXIT_FAILURE );
     }
 
-    int layer_size = atoi( argv[1] );
+    int total_size = atoi( argv[1] );
+    int layer_size = total_size / size;
+
+    if (layer_size < 4 || total_size % size) {
+        fprintf(stderr, "invalid size\n");
+    }
+
     int num_storms = argc-2;
     Storm storms[ num_storms ];
 
@@ -187,13 +193,13 @@ int main(int argc, char *argv[]) {
 
     /* 3. Allocate memory for the layer and initialize to zero */
     float *layer = (float *)malloc( sizeof(float) * layer_size );
-    float *layer_copy = (float *)malloc( sizeof(float) * layer_size );
+    float *layer_copy = (float *)malloc( sizeof(float) * (layer_size+2) );
     if ( layer == NULL || layer_copy == NULL ) {
         fprintf(stderr,"Error: Allocating the layer memory\n");
         exit( EXIT_FAILURE );
     }
     for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
-    for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
+    for( k=0; k<layer_size+2; k++ ) layer_copy[k] = 0.0f;
     
     /* 4. Storms simulation */
     for( i=0; i<num_storms; i++) {
@@ -209,21 +215,45 @@ int main(int argc, char *argv[]) {
             /* For each cell in the layer */
             for( k=0; k<layer_size; k++ ) {
                 /* Update the energy value for the cell */
-                update( layer, layer_size, k, position, energy );
+                //update( layer, layer_size, k, position, energy );
+                update( layer, total_size, k, position - rank*layer_size, energy );
             }
         }
 
         /* 4.2. Energy relaxation between storms */
         /* 4.2.1. Copy values to the ancillary array */
         for( k=0; k<layer_size; k++ ) 
-            layer_copy[k] = layer[k];
+            layer_copy[k+1] = layer[k];
+
+#if 1
+        // Send left
+        if (rank > 0)
+            MPI_Send(&layer[0], 1, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD);
+
+        // Send right
+        if (rank < size-1)
+            MPI_Send(&layer[layer_size-1], 1, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD);
+
+        // Recv right
+        if (rank < size-1)
+            MPI_Recv(&layer_copy[layer_size+1], 1, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        else
+            layer_copy[layer_size+1] = 2*layer_copy[layer_size] - layer_copy[layer_size-1];
+
+        // Recv left
+        if (rank > 0)
+            MPI_Recv(&layer_copy[0], 1, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        else
+            layer_copy[0] = 2*layer_copy[1] - layer_copy[2];
+#endif
 
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
-        for( k=1; k<layer_size-1; k++ )
-            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
+        for( k=0; k<layer_size; k++ )
+            layer[k] = ( layer_copy[k] + layer_copy[k+1] + layer_copy[k+2] ) / 3;
 
         /* 4.3. Locate the maximum value in the layer, and its position */
+        // TODO ghost
         for( k=1; k<layer_size-1; k++ ) {
             /* Check it only if it is a local maximum */
             if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
@@ -235,18 +265,50 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    struct {
+        float max;
+        int pos;
+    } in[num_storms], out[num_storms];
+
+    for (int i = 0; i < num_storms; i++) {
+        in[i].max = maximum[i];
+        in[i].pos = positions[i] + layer_size*rank;
+    }
+
+    if (MPI_SUCCESS != MPI_Reduce(in, out, num_storms, MPI_FLOAT_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD)) {
+        fprintf(stderr, "failed reduce\n");
+        exit(1);
+    }
+
+    if (rank == 0) {
+        for (int i = 0; i < num_storms; i++) {
+            maximum[i] = out[i].max;
+            positions[i] = out[i].pos;
+        }
+    }
+
     /* END: Do NOT optimize/parallelize the code below this point */
 
     /* 5. End time measurement */
     MPI_Barrier(MPI_COMM_WORLD);
     ttotal = cp_Wtime() - ttotal;
 
-    if ( rank == 0 ) {
-
     /* 6. DEBUG: Plot the result (only for layers up to 35 points) */
     #ifdef DEBUG
-    debug_print( layer_size, layer, positions, maximum, num_storms );
+    float *glayer = NULL;
+    if (rank == 0)
+        glayer = malloc(sizeof(float) * total_size);
+
+    MPI_Gather(layer, layer_size, MPI_FLOAT, glayer, layer_size, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    if (rank == 0)
+        debug_print( total_size, glayer, positions, maximum, num_storms );
     #endif
+
+    if ( rank == 0 ) {
+
+        printf("max = %f\n", maximum[i]);
+
 
     /* 7. Results output, used by the Tablon online judge software */
     printf("\n");
@@ -263,6 +325,8 @@ int main(int argc, char *argv[]) {
     /* 8. Free resources */    
     for( i=0; i<argc-2; i++ )
         free( storms[i].posval );
+
+    MPI_Finalize();
 
     /* 9. Program ended successfully */
     return 0;
