@@ -163,6 +163,31 @@ Storm read_storm_file( char *fname ) {
     return storm;
 }
 
+__global__ void update_kernel(float *layer, int layer_size, int pos, float energy)
+{
+    int k = blockIdx.x*blockDim.x + threadIdx.x;
+    if (k >= layer_size)
+        return;
+
+    int distance = pos - k;
+    if ( distance < 0 ) distance = - distance;
+
+    /* 2. Impact cell has a distance value of 1 */
+    distance = distance + 1;
+
+    /* 3. Square root of the distance */
+    /* NOTE: Real world atenuation typically depends on the square of the distance.
+       We use here a tailored equation that affects a much wider range of cells */
+    float atenuacion = sqrtf( (float)distance );
+
+    /* 4. Compute attenuated energy */
+    float energy_k = energy / layer_size / atenuacion;
+
+    /* 5. Do not add if its absolute value is lower than the threshold */
+    if ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size )
+        layer[k] = layer[k] + energy_k;
+}
+
 /*
  * MAIN PROGRAM
  */
@@ -207,6 +232,13 @@ int main(int argc, char *argv[]) {
     }
     for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
     for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
+
+    float *d_layer = NULL;
+    float *d_layer_copy = NULL;
+    hipMalloc(&d_layer, layer_size*sizeof(float));
+    hipMalloc(&d_layer_copy, layer_size*sizeof(float));
+
+    hipMemset(d_layer, 0, layer_size*sizeof(float));
     
     /* 4. Storms simulation */
     for( i=0; i<num_storms; i++) {
@@ -219,20 +251,22 @@ int main(int argc, char *argv[]) {
             /* Get impact position */
             int position = storms[i].posval[j*2];
 
-            /* For each cell in the layer */
-            for( k=0; k<layer_size; k++ ) {
-                /* Update the energy value for the cell */
-                update( layer, layer_size, k, position, energy );
-            }
+            int block_size = 256;
+            int num_blocks = (layer_size+block_size-1)/block_size;
+            update_kernel<<<num_blocks, block_size>>>(d_layer, layer_size, position, energy);
         }
 
         /* 4.2. Energy relaxation between storms */
         /* 4.2.1. Copy values to the ancillary array */
-        for( k=0; k<layer_size; k++ ) 
-            layer_copy[k] = layer[k];
+        hipMemcpyDtoD(d_layer_copy, d_layer, layer_size*sizeof(float));
+
+        hipMemcpyDtoH(layer_copy, d_layer_copy, layer_size*sizeof(float));
 
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
+        //conv_kernel(d_layer, d_layer_copy, layer_size);
+        layer[0] = layer_copy[0];
+        layer[layer_size-1] = layer_copy[layer_size-1];
         for( k=1; k<layer_size-1; k++ )
             layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
 
