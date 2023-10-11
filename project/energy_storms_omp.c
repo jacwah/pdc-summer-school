@@ -206,15 +206,17 @@ int main(int argc, char *argv[]) {
 
         /* 4.1. Add impacts energies to layer cells */
         /* For each particle */
-        for( j=0; j<storms[i].size; j++ ) {
-            /* Get impact energy (expressed in thousandths) */
-            float energy = (float)storms[i].posval[j*2+1] * 1000;
-            /* Get impact position */
-            int position = storms[i].posval[j*2];
 
-            /* For each cell in the layer */
-#pragma omp parallel for
-            for( k=0; k<layer_size; k++ ) {
+           /* For each cell in the layer */
+#pragma omp parallel for  
+		for(int k=0; k<layer_size; k++ ) {
+#pragma omp simd 
+			for(int j=0; j<storms[i].size; j++ ) {
+ 
+				/* Get impact energy (expressed in thousandths) */
+				float energy = (float)storms[i].posval[j*2+1] * 1000;
+				/* Get impact position */
+				int position = storms[i].posval[j*2];
                 /* Update the energy value for the cell */
                 update( layer, layer_size, k, position, energy );
             }
